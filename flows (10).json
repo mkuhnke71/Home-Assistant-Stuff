@@ -1,0 +1,945 @@
+[
+    {
+        "id": "492ffdad2c0718f9",
+        "type": "group",
+        "z": "bc43d9c914784ed2",
+        "name": "Foyer",
+        "style": {
+            "label": true
+        },
+        "nodes": [
+            "d4f5731f74d70a6d",
+            "c8d7c3554a584536"
+        ],
+        "x": 1134,
+        "y": 722.98828125,
+        "w": 568.984375,
+        "h": 98.01171875
+    },
+    {
+        "id": "ea1dae26620c8815",
+        "type": "subflow",
+        "name": "Turn Off Lights - Perform Action",
+        "info": "",
+        "category": "",
+        "in": [
+            {
+                "x": 60,
+                "y": 120,
+                "wires": [
+                    {
+                        "id": "e6a1cce9faccc411"
+                    }
+                ]
+            }
+        ],
+        "out": [
+            {
+                "x": 1760,
+                "y": 320,
+                "wires": [
+                    {
+                        "id": "8d91348b1be49dee",
+                        "port": 1
+                    },
+                    {
+                        "id": "8fad7185e10c5422",
+                        "port": 0
+                    }
+                ]
+            }
+        ],
+        "env": [
+            {
+                "name": "SENSOR",
+                "type": "str",
+                "value": ""
+            },
+            {
+                "name": "ENTITYID",
+                "type": "str",
+                "value": ""
+            },
+            {
+                "name": "DEBUG",
+                "type": "bool",
+                "value": "false"
+            },
+            {
+                "name": "OVER_X_MINUTES",
+                "type": "num",
+                "value": "10"
+            },
+            {
+                "name": "MIN_SEC_ABSENCE",
+                "type": "num",
+                "value": "0"
+            },
+            {
+                "name": "PRESENCE",
+                "type": "str",
+                "value": "LONGEST"
+            },
+            {
+                "name": "MIN_SEC_ON",
+                "type": "num",
+                "value": "0"
+            },
+            {
+                "name": "IS_DARK_LUX",
+                "type": "num",
+                "value": "0"
+            },
+            {
+                "name": "REASON",
+                "type": "str",
+                "value": ""
+            }
+        ],
+        "meta": {},
+        "color": "#DDAA99"
+    },
+    {
+        "id": "ac3b64fafd20abe4",
+        "type": "api-get-history",
+        "z": "ea1dae26620c8815",
+        "name": "Get Presence History",
+        "server": "7bd90b25.c58474",
+        "version": 1,
+        "startDate": "",
+        "endDate": "",
+        "entityId": "{{sensor}}",
+        "entityIdType": "equals",
+        "useRelativeTime": true,
+        "relativeTime": "",
+        "flatten": true,
+        "outputType": "array",
+        "outputLocationType": "msg",
+        "outputLocation": "payload",
+        "x": 1420,
+        "y": 80,
+        "wires": [
+            [
+                "76dc64f22800d923"
+            ]
+        ]
+    },
+    {
+        "id": "76dc64f22800d923",
+        "type": "function",
+        "z": "ea1dae26620c8815",
+        "name": "Determine Action",
+        "func": "/*\n * Occupancy-based entity control\n *\n * Expected msg properties:\n *   msg.entityid\n *   msg.sensor                 Optional if SENSOR contains the entity ID\n *   msg.min_absence            Seconds\n *   msg.min_on_time            Seconds\n *   msg.x_minutes              History window in minutes\n *   msg.is_dark_lux            Optional lux threshold\n *   msg.payload                Home Assistant history array when applicable\n *\n * Environment variables:\n *   PRESENCE                   TOTAL, LONGEST, AVG, or LAST\n *   SENSOR                     Sensor entity ID, true/false, or blank\n *   DEBUG                      true/false, 1/0, yes/no, on/off\n *   NODE_RED_USER_ID           Optional Node-RED Home Assistant user ID\n */\n\nconst DEFAULT_NODE_RED_USER_ID =\n  \"e7ab148881b7499f9b3189442f4e473c\";\n\nconst PRESENCE_STATES = new Set([\n  \"on\",\n  \"detected\",\n  \"true\",\n  \"home\",\n  \"occupied\",\n  \"present\"\n]);\n\nconst INVALID_STATES = new Set([\n  \"unknown\",\n  \"unavailable\",\n  \"none\",\n  \"null\",\n  \"\"\n]);\n\nfunction envString(name, fallback = \"\") {\n  const value = env.get(name);\n\n  if (value === undefined || value === null) {\n    return fallback;\n  }\n\n  return String(value).trim();\n}\n\nfunction envBoolean(name, fallback = false) {\n  const value = env.get(name);\n\n  if (value === undefined || value === null || value === \"\") {\n    return fallback;\n  }\n\n  if (typeof value === \"boolean\") {\n    return value;\n  }\n\n  const normalized = String(value).trim().toLowerCase();\n\n  if ([\"true\", \"1\", \"yes\", \"on\"].includes(normalized)) {\n    return true;\n  }\n\n  if ([\"false\", \"0\", \"no\", \"off\"].includes(normalized)) {\n    return false;\n  }\n\n  return fallback;\n}\n\nfunction finiteNumber(value, fallback = 0, minimum = null) {\n  const number = Number(value);\n\n  if (!Number.isFinite(number)) {\n    return fallback;\n  }\n\n  if (minimum !== null && number < minimum) {\n    return minimum;\n  }\n\n  return number;\n}\n\nfunction secondsSince(timestamp, currentTime) {\n  const timestampMs = Date.parse(timestamp);\n\n  if (!Number.isFinite(timestampMs)) {\n    return null;\n  }\n\n  // Avoid negative durations if clocks are slightly out of sync.\n  return Math.max(0, (currentTime - timestampMs) / 1000);\n}\n\nfunction convertSecondsToWords(totalSeconds) {\n  const value = Number(totalSeconds);\n\n  if (!Number.isFinite(value) || value <= 0) {\n    return \"0 seconds\";\n  }\n\n  const roundedSeconds = Math.floor(value);\n  const minutes = Math.floor(roundedSeconds / 60);\n  const seconds = roundedSeconds % 60;\n\n  const parts = [];\n\n  if (minutes > 0) {\n    parts.push(\n      `${minutes} ${minutes === 1 ? \"minute\" : \"minutes\"}`\n    );\n  }\n\n  if (seconds > 0) {\n    parts.push(\n      `${seconds} ${seconds === 1 ? \"second\" : \"seconds\"}`\n    );\n  }\n\n  return parts.join(\" and \") || \"0 seconds\";\n}\n\nfunction appendDescription(text) {\n  if (!text) {\n    return;\n  }\n\n  msg.descr = msg.descr\n    ? `${msg.descr.trim()} ${text.trim()}`\n    : text.trim();\n}\n\nfunction debugLog(message, details) {\n  if (!DEBUG) {\n    return;\n  }\n\n  if (details === undefined) {\n    node.warn(message);\n  } else {\n    node.warn({\n      message,\n      details\n    });\n  }\n}\n\nfunction failSafe(message, details) {\n  msg.action = \"leave\";\n  msg.error = message;\n\n  appendDescription(`Unable to evaluate automation safely: ${message}.`);\n\n  if (details !== undefined) {\n    msg.error_details = details;\n  }\n\n  // Passing msg allows a connected Catch node to retain the original message.\n  node.error(message, msg);\n\n  return msg;\n}\n\nfunction getHaEntity(states, entityId) {\n  if (!entityId || typeof entityId !== \"string\") {\n    return null;\n  }\n\n  return states[entityId] || null;\n}\n\nfunction normalizeState(value) {\n  if (value === undefined || value === null) {\n    return \"\";\n  }\n\n  return String(value).trim().toLowerCase();\n}\n\nfunction isPresenceState(value) {\n  return PRESENCE_STATES.has(normalizeState(value));\n}\n\nfunction calculatePresence(history, windowStart, currentTime, mode) {\n  if (!Array.isArray(history)) {\n    throw new Error(\n      \"Expected a Home Assistant history array in msg.payload\"\n    );\n  }\n\n  const records = [];\n\n  /*\n   * Normalize the history once. Records after \"now\" are ignored.\n   * Sorting remains necessary because HA history is not assumed to be ordered.\n   */\n  for (const item of history) {\n    if (!item || typeof item !== \"object\") {\n      continue;\n    }\n\n    const timestamp = item.last_changed || item.last_updated;\n    const timestampMs = Date.parse(timestamp);\n\n    if (!Number.isFinite(timestampMs) || timestampMs > currentTime) {\n      continue;\n    }\n\n    records.push({\n      state: normalizeState(item.state),\n      ts: timestampMs\n    });\n  }\n\n  records.sort((a, b) => a.ts - b.ts);\n\n  /*\n   * Determine the state at the beginning of the requested window.\n   * If no earlier state is available, default to off.\n   */\n  let stateAtWindowStart = \"off\";\n  let firstWindowRecordIndex = records.length;\n\n  for (let index = 0; index < records.length; index += 1) {\n    const record = records[index];\n\n    if (record.ts <= windowStart) {\n      stateAtWindowStart = record.state;\n    } else {\n      firstWindowRecordIndex = index;\n      break;\n    }\n  }\n\n  const intervals = [];\n  let currentState = stateAtWindowStart;\n  let intervalStart = windowStart;\n\n  /*\n   * Walk only the records that occur inside the requested window.\n   */\n  for (\n    let index = firstWindowRecordIndex;\n    index < records.length;\n    index += 1\n  ) {\n    const record = records[index];\n\n    if (record.ts < windowStart) {\n      continue;\n    }\n\n    if (isPresenceState(currentState) && record.ts > intervalStart) {\n      intervals.push(record.ts - intervalStart);\n    }\n\n    currentState = record.state;\n    intervalStart = Math.max(record.ts, windowStart);\n  }\n\n  /*\n   * Close the final interval at the current time.\n   */\n  if (isPresenceState(currentState) && currentTime > intervalStart) {\n    intervals.push(currentTime - intervalStart);\n  }\n\n  if (intervals.length === 0) {\n    return {\n      milliseconds: 0,\n      count: 0\n    };\n  }\n\n  let milliseconds = 0;\n\n  switch (mode) {\n    case \"TOTAL\":\n      milliseconds = intervals.reduce(\n        (sum, duration) => sum + duration,\n        0\n      );\n      break;\n\n    case \"LONGEST\":\n      milliseconds = Math.max(...intervals);\n      break;\n\n    case \"AVG\":\n      milliseconds =\n        intervals.reduce(\n          (sum, duration) => sum + duration,\n          0\n        ) / intervals.length;\n      break;\n\n    case \"LAST\":\n      milliseconds = intervals[intervals.length - 1];\n      break;\n\n    default:\n      throw new Error(\n        `Unsupported PRESENCE mode \"${mode}\"`\n      );\n  }\n\n  return {\n    milliseconds,\n    count: intervals.length\n  };\n}\n\n\n/* ------------------------------------------------------------------\n * Configuration\n * ------------------------------------------------------------------ */\n\nconst NOW = Date.now();\nconst DEBUG = envBoolean(\"DEBUG\", false);\n\nconst requestedPresenceMode =\n  envString(\"PRESENCE\", \"TOTAL\").toUpperCase();\n\nconst validPresenceModes = new Set([\n  \"TOTAL\",\n  \"LONGEST\",\n  \"AVG\",\n  \"LAST\"\n]);\n\nconst presenceMode = validPresenceModes.has(requestedPresenceMode)\n  ? requestedPresenceMode\n  : \"TOTAL\";\n\nif (requestedPresenceMode !== presenceMode) {\n  node.warn(\n    `Invalid PRESENCE value \"${requestedPresenceMode}\". ` +\n    \"Defaulting to TOTAL.\"\n  );\n}\n\nconst sensorEnvironmentValue = envString(\"SENSOR\", \"\");\nconst nodeRedUserId =\n  envString(\"NODE_RED_USER_ID\", DEFAULT_NODE_RED_USER_ID);\n\nmsg.action = \"leave\";\nmsg.descr = \"\";\n\nif (\n  msg.reason !== undefined &&\n  msg.reason !== null &&\n  String(msg.reason).trim() !== \"\"\n) {\n  msg.descr = `${String(msg.reason).trim()} `;\n}\n\n\n/* ------------------------------------------------------------------\n * Validate Home Assistant global context\n * ------------------------------------------------------------------ */\n\ntry {\n  const haGlobal = global.get(\"homeassistant\");\n  const homeAssistant = haGlobal && haGlobal.homeAssistant;\n  const states = homeAssistant && homeAssistant.states;\n\n  if (!states || typeof states !== \"object\") {\n    return failSafe(\n      \"Home Assistant global state is unavailable. \" +\n      \"Verify that global context is enabled on the Home Assistant server node\"\n    );\n  }\n\n  const entityId =\n    typeof msg.entityid === \"string\"\n      ? msg.entityid.trim()\n      : \"\";\n\n  if (!entityId) {\n    return failSafe(\"msg.entityid is missing or invalid\");\n  }\n\n  const entity = getHaEntity(states, entityId);\n\n  if (!entity) {\n    return failSafe(\n      `Home Assistant entity \"${entityId}\" was not found`\n    );\n  }\n\n  msg.entityid = entityId;\n  msg.currently = normalizeState(entity.state);\n\n  const context = entity.context || {};\n  msg.fullauto = context.user_id === nodeRedUserId;\n\n  /*\n   * Normalize all timing values once.\n   */\n  msg.min_absence = finiteNumber(msg.min_absence, 0, 0);\n  msg.min_on_time = finiteNumber(msg.min_on_time, 0, 0);\n  msg.x_minutes = finiteNumber(msg.x_minutes, 10, 0);\n\n  /*\n   * If the device was manually activated, double the configured times.\n   */\n  if (!msg.fullauto) {\n    msg.min_absence *= 2;\n    msg.min_on_time *= 2;\n\n    if (msg.min_absence === 0) {\n      msg.min_absence = 10 * 60;\n    }\n\n    if (msg.min_on_time === 0) {\n      msg.min_on_time = 10 * 60;\n    }\n  }\n\n  const onForSeconds = secondsSince(entity.last_changed, NOW);\n\n  if (onForSeconds === null) {\n    return failSafe(\n      `Entity \"${entityId}\" has an invalid last_changed timestamp`,\n      entity.last_changed\n    );\n  }\n\n  msg.on_for_seconds =\n    msg.currently === \"on\" ? onForSeconds : 0;\n\n  debugLog(\"Entity evaluation started\", {\n    entityId: msg.entityid,\n    state: msg.currently,\n    fullauto: msg.fullauto,\n    onForSeconds: msg.on_for_seconds,\n    minOnTime: msg.min_on_time,\n    minAbsence: msg.min_absence\n  });\n\n\n  /* --------------------------------------------------------------\n   * Entity is already off\n   * -------------------------------------------------------------- */\n\n  if (msg.currently !== \"on\") {\n    msg.currently = \"off\";\n    msg.on_for_seconds = 0;\n    appendDescription(`Leaving ${msg.entityid} off.`);\n\n    return msg;\n  }\n\n\n  /* --------------------------------------------------------------\n   * Determine whether a motion/occupancy sensor is configured\n   * -------------------------------------------------------------- */\n\n  let sensorId = \"\";\n\n  if (\n    typeof msg.sensor === \"string\" &&\n    msg.sensor.trim() !== \"\"\n  ) {\n    sensorId = msg.sensor.trim();\n  } else if (\n    sensorEnvironmentValue.includes(\".\") &&\n    ![\"true\", \"false\", \"yes\", \"no\", \"on\", \"off\", \"1\", \"0\"]\n      .includes(sensorEnvironmentValue.toLowerCase())\n  ) {\n    /*\n     * SENSOR may contain the actual entity ID.\n     */\n    sensorId = sensorEnvironmentValue;\n  }\n\n  const sensorFlagEnabled = [\n    \"true\",\n    \"yes\",\n    \"on\",\n    \"1\"\n  ].includes(sensorEnvironmentValue.toLowerCase());\n\n  const hasSensor = Boolean(sensorId) || sensorFlagEnabled;\n\n  if (hasSensor && !sensorId) {\n    return failSafe(\n      \"A sensor is enabled, but msg.sensor does not contain a sensor entity ID\"\n    );\n  }\n\n\n  /* --------------------------------------------------------------\n   * Sensor-based automation\n   * -------------------------------------------------------------- */\n\n  if (hasSensor) {\n    const sensor = getHaEntity(states, sensorId);\n\n    if (!sensor) {\n      return failSafe(\n        `Occupancy sensor \"${sensorId}\" was not found`\n      );\n    }\n\n    msg.sensor = sensorId;\n\n    /*\n     * Preserve msg.Occupied if an upstream node intentionally set it.\n     * Otherwise use the live HA sensor state.\n     */\n    let occupiedState =\n      msg.Occupied !== undefined &&\n        msg.Occupied !== null &&\n        String(msg.Occupied).trim() !== \"\"\n        ? normalizeState(msg.Occupied)\n        : normalizeState(sensor.state);\n\n    if (INVALID_STATES.has(occupiedState)) {\n      return failSafe(\n        `Occupancy sensor \"${sensorId}\" has an invalid state`,\n        sensor.state\n      );\n    }\n\n    msg.Occupied = isPresenceState(occupiedState)\n      ? \"on\"\n      : \"off\";\n\n    const occupancyChangeSeconds =\n      secondsSince(sensor.last_changed, NOW);\n\n    if (occupancyChangeSeconds === null) {\n      return failSafe(\n        `Sensor \"${sensorId}\" has an invalid last_changed timestamp`,\n        sensor.last_changed\n      );\n    }\n\n    if (msg.Occupied === \"on\") {\n      msg.SecondsofOccupancy = occupancyChangeSeconds;\n      msg.SecondsSinceOccupancy = 0;\n      msg.OccupancyCount = 1;\n\n      appendDescription(\n        `Sensor ${sensorId} indicates the room is occupied.`\n      );\n\n      debugLog(\"Room is currently occupied\", {\n        sensor: sensorId,\n        occupiedForSeconds: occupancyChangeSeconds\n      });\n    } else {\n      msg.SecondsofOccupancy = 0;\n      msg.SecondsSinceOccupancy = occupancyChangeSeconds;\n      msg.OccupancyCount = 0;\n\n      debugLog(\"Room is currently unoccupied\", {\n        sensor: sensorId,\n        clearForSeconds: occupancyChangeSeconds\n      });\n\n      /*\n       * Analyze occupancy history.\n       */\n      const windowMs = msg.x_minutes * 60 * 1000;\n      const windowStart = NOW - windowMs;\n\n      const presenceResult = calculatePresence(\n        msg.payload,\n        windowStart,\n        NOW,\n        presenceMode\n      );\n\n      /*\n       * Clamp the result to the requested history window.\n       */\n      const presenceMs = Math.min(\n        Math.max(0, presenceResult.milliseconds),\n        windowMs\n      );\n\n      msg.SecondsofOccupancy =\n        Math.round(presenceMs / 1000);\n\n      msg.OccupancyCount = presenceResult.count;\n\n      const minimumOnTimeMet =\n        msg.min_on_time === 0 ||\n        msg.on_for_seconds >= msg.min_on_time;\n\n      const minimumAbsenceMet =\n        msg.min_absence === 0 ||\n        msg.SecondsSinceOccupancy >= msg.min_absence;\n\n      if (minimumOnTimeMet && minimumAbsenceMet) {\n        msg.decision = 218;\n        msg.action = \"off\";\n\n        msg.descr =\n          `Turning Off ${msg.entityid}. ` +\n          `No motion for ` +\n          `${convertSecondsToWords(msg.SecondsSinceOccupancy)}`;\n\n        if (msg.min_on_time > 0) {\n          msg.descr +=\n            ` and the minimum on time (` +\n            `${convertSecondsToWords(msg.min_on_time)}) ` +\n            `has been met`;\n        }\n\n        if (msg.min_absence > 0) {\n          msg.descr +=\n            ` and the minimum absence (` +\n            `${convertSecondsToWords(msg.min_absence)}) ` +\n            `has been met`;\n        }\n\n        msg.descr += \".\";\n      } else {\n        msg.decision = 233;\n        msg.action = \"leave\";\n\n        msg.descr =\n          `Leaving ${msg.entityid} on. ` +\n          `No motion for ` +\n          `${convertSecondsToWords(msg.SecondsSinceOccupancy)}`;\n\n        if (!minimumOnTimeMet) {\n          msg.descr +=\n            ` and the minimum on time (` +\n            `${convertSecondsToWords(msg.min_on_time)}) ` +\n            `has NOT been met`;\n        }\n\n        if (!minimumAbsenceMet) {\n          msg.descr +=\n            ` and the minimum absence (` +\n            `${convertSecondsToWords(msg.min_absence)}) ` +\n            `has NOT been met`;\n        }\n\n        msg.descr += \".\";\n      }\n\n      msg.sentence =\n        convertSecondsToWords(msg.SecondsofOccupancy);\n\n      appendDescription(\n        `${presenceMode} presence was ${msg.sentence}.`\n      );\n    }\n\n    /*\n     * If the room is occupied, explicitly describe why the entity\n     * remains on.\n     */\n    if (\n      msg.Occupied === \"on\" &&\n      msg.action === \"leave\"\n    ) {\n      msg.descr =\n        `Leaving ${msg.entityid} on because the room ` +\n        `is currently occupied.`;\n\n      appendDescription(\n        `Sensor ${sensorId} has indicated occupancy for ` +\n        `${convertSecondsToWords(msg.SecondsofOccupancy)}.`\n      );\n    }\n  }\n\n\n  /* --------------------------------------------------------------\n   * No-sensor automation\n   * -------------------------------------------------------------- */\n\n  else {\n    debugLog(\"No occupancy sensor configured\");\n\n    msg.sentence =\n      convertSecondsToWords(msg.on_for_seconds);\n\n    /*\n     * Preserve the original behavior:\n     * min_on_time acts as the point at which the device may be\n     * turned off when no sensor is configured.\n     *\n     * A value of zero causes immediate eligibility.\n     */\n    const maximumOnTimeReached =\n      msg.on_for_seconds >= msg.min_on_time;\n\n    if (\n      msg.action === \"leave\" &&\n      msg.currently === \"on\" &&\n      maximumOnTimeReached\n    ) {\n      msg.decision = 274;\n      msg.action = \"off\";\n\n      msg.descr =\n        `Turning Off ${msg.entityid} because it has been on ` +\n        `for ${msg.sentence}, meeting or exceeding the ` +\n        `configured on-time threshold of ` +\n        `${convertSecondsToWords(msg.min_on_time)}.`;\n    } else {\n      msg.decision = 284;\n      msg.action = \"leave\";\n\n      msg.descr =\n        `Leaving ${msg.entityid} ${msg.currently} because ` +\n        `it has only been ${msg.currently} for ` +\n        `${msg.sentence}.`;\n\n      if (msg.min_on_time > 0) {\n        appendDescription(\n          `It must remain on for at least ` +\n          `${convertSecondsToWords(msg.min_on_time)}.`\n        );\n      }\n    }\n  }\n\n\n  /* --------------------------------------------------------------\n   * Illuminance override\n   * -------------------------------------------------------------- */\n\n  const luxThreshold =\n    finiteNumber(msg.is_dark_lux, 0, 0);\n\n  if (\n    msg.fullauto &&\n    msg.currently === \"on\" &&\n    msg.action === \"leave\" &&\n    luxThreshold > 0\n  ) {\n    const illuminanceEntityId =\n      typeof msg.illuminance_entity === \"string\" &&\n        msg.illuminance_entity.trim() !== \"\"\n        ? msg.illuminance_entity.trim()\n        : \"sensor.illuminance\";\n\n    const illuminanceEntity =\n      getHaEntity(states, illuminanceEntityId);\n\n    if (!illuminanceEntity) {\n      debugLog(\n        `Illuminance entity \"${illuminanceEntityId}\" was not found`\n      );\n    } else {\n      const currentLux =\n        Number(illuminanceEntity.state);\n\n      if (!Number.isFinite(currentLux)) {\n        debugLog(\n          `Illuminance entity \"${illuminanceEntityId}\" ` +\n          \"does not have a numeric state\",\n          illuminanceEntity.state\n        );\n      } else {\n        msg.current_lux = currentLux;\n\n        if (currentLux > luxThreshold) {\n          msg.decision = 299;\n          msg.action = \"off\";\n\n          appendDescription(\n            `Turning Off ${msg.entityid} because ` +\n            `illuminance (${currentLux}) is above the ` +\n            `configured threshold of ${luxThreshold}.`\n          );\n        }\n      }\n    }\n  }\n\n\n  /* --------------------------------------------------------------\n   * Final description details\n   * -------------------------------------------------------------- */\n\n  if (!msg.fullauto) {\n    appendDescription(\n      \"The entity was last turned on manually.\"\n    );\n  }\n\n  debugLog(\"Entity evaluation completed\", {\n    entityId: msg.entityid,\n    action: msg.action,\n    decision: msg.decision,\n    description: msg.descr\n  });\n\n  return msg;\n\n} catch (error) {\n  const message =\n    error && error.message\n      ? error.message\n      : String(error);\n\n  return failSafe(\n    `Unexpected function error: ${message}`,\n    error && error.stack ? error.stack : undefined\n  );\n}",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1630,
+        "y": 120,
+        "wires": [
+            [
+                "e57615c1c91c82f1"
+            ]
+        ]
+    },
+    {
+        "id": "8d91348b1be49dee",
+        "type": "api-current-state",
+        "z": "ea1dae26620c8815",
+        "name": "Motion Lights are turned on",
+        "server": "7bd90b25.c58474",
+        "version": 3,
+        "outputs": 2,
+        "halt_if": "on",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "entity_id": "input_boolean.bool_motion_activated_lights",
+        "state_type": "str",
+        "blockInputOverrides": false,
+        "outputProperties": [],
+        "for": "0",
+        "forType": "num",
+        "forUnits": "minutes",
+        "override_topic": false,
+        "state_location": "payload",
+        "override_payload": "msg",
+        "entity_location": "data",
+        "override_data": "msg",
+        "x": 420,
+        "y": 120,
+        "wires": [
+            [
+                "0ba64b6002a978a9"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "e6a1cce9faccc411",
+        "type": "change",
+        "z": "ea1dae26620c8815",
+        "name": "",
+        "rules": [
+            {
+                "t": "set",
+                "p": "entityid",
+                "pt": "msg",
+                "to": "ENTITYID",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "sensor",
+                "pt": "msg",
+                "to": "SENSOR",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "x_minutes",
+                "pt": "msg",
+                "to": "OVER_X_MINUTES",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "min_absence",
+                "pt": "msg",
+                "to": "MIN_SEC_ABSENCE",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "min_on_time",
+                "pt": "msg",
+                "to": "MIN_SEC_ON",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "is_dark_lux",
+                "pt": "msg",
+                "to": "IS_DARK_LUX",
+                "tot": "env"
+            },
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "{\"entity_id\": entityid}",
+                "tot": "jsonata"
+            },
+            {
+                "t": "set",
+                "p": "reason",
+                "pt": "msg",
+                "to": "REASON",
+                "tot": "env"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 200,
+        "y": 120,
+        "wires": [
+            [
+                "8d91348b1be49dee"
+            ]
+        ]
+    },
+    {
+        "id": "34ea86bc4825178e",
+        "type": "catch",
+        "z": "ea1dae26620c8815",
+        "name": "Error Catch - Auto Clean Nodes",
+        "scope": "group",
+        "uncaught": false,
+        "x": 470,
+        "y": 20,
+        "wires": [
+            [
+                "34091310b9b87bfe"
+            ]
+        ]
+    },
+    {
+        "id": "34091310b9b87bfe",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "name": "Error Catch - Auto Turn Off",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 840,
+        "y": 20,
+        "wires": []
+    },
+    {
+        "id": "4f516075594ec7ce",
+        "type": "function",
+        "z": "ea1dae26620c8815",
+        "name": "set x_minutes",
+        "func": "// Construct the relative time string from your variable\nmsg.payload = {\n    relativeTime: msg.x_minutes + \" minutes\"\n};\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1200,
+        "y": 80,
+        "wires": [
+            [
+                "ac3b64fafd20abe4"
+            ]
+        ]
+    },
+    {
+        "id": "4af011807e87489c",
+        "type": "comment",
+        "z": "ea1dae26620c8815",
+        "name": "How this Sub Flow Works",
+        "info": "This Sub Flow is meant to turn entiries Off and also log an entry for each entity that it turns off.\n\nIt will evaluate entities that are groups and only log entries for theose entities that are currently on and being turned off\n\nThe reason that appears in the log entry, is populated by the Determine Action function\n\nThis Sub-Flow will take the given values...\n\n1. SENSOR: motion/occupancy sensor enyity\n    Required\n2. ENTITY: entity to turn off\n    Required\n3. MIN_SEC_ABSENCE: Min time of absence - seconds\n    default 0\n4. MIN_SEC_ON: Min Time device has been on - seconds\n    default 0\n5. PRESENCE: Calculation Method (LONGEST, LAST, TOTAL, AVG) for amount of time of presence\n    default LONGEST\n6. OVER_X_MINUTES: Amount of time in minutes that history of occupancy should be evaluated\n    default 10\n7. IS_DARK_LUX: Lux (number)\n    if 0 this is ignored\n    default 0\n8. DEBUG (true/false) determines if the debug log will be shown the logic behind this sub flow\n    default false\n\nThen decide if it should be turned off\nIf an entity was turned on manually then the values for MIN_SEC_ON & MIN_SEC_ABSENCE will be doubled and at a minumum of 10 minutes if not set\n\nresults...\n\nmsg.action is the action that has been taken on the entity (leave, off)\nmsg.descr is a description of what is being done and why\nmsg.SecondsSinceOccupancy = sense sime the room was last occupied\nmsg.SecondsOfOccupancy = total time of occupancy based on the calcualtion method (LONGEST, LAST, TOTAL, AVG)\nmsg.reason = a reason why action = leave ",
+        "x": 170,
+        "y": 20,
+        "wires": []
+    },
+    {
+        "id": "df0c4c63bcb8d98f",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "Motion Sensor Provided",
+        "property": "SENSOR",
+        "propertyType": "env",
+        "rules": [
+            {
+                "t": "neq",
+                "v": "",
+                "vt": "str"
+            },
+            {
+                "t": "else"
+            }
+        ],
+        "checkall": "false",
+        "repair": false,
+        "outputs": 2,
+        "x": 950,
+        "y": 100,
+        "wires": [
+            [
+                "4f516075594ec7ce"
+            ],
+            [
+                "76dc64f22800d923"
+            ]
+        ]
+    },
+    {
+        "id": "1e7e72e7df8f0061",
+        "type": "change",
+        "z": "ea1dae26620c8815",
+        "name": "Set Reason",
+        "rules": [
+            {
+                "t": "set",
+                "p": "reason",
+                "pt": "msg",
+                "to": "No Presence Sensor Provided",
+                "tot": "str"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 1190,
+        "y": 140,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "0ba64b6002a978a9",
+        "type": "api-current-state",
+        "z": "ea1dae26620c8815",
+        "name": "Entity is On",
+        "server": "7bd90b25.c58474",
+        "version": 3,
+        "outputs": 2,
+        "halt_if": "on",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "entity_id": "{{entityid}}",
+        "state_type": "str",
+        "blockInputOverrides": true,
+        "outputProperties": [],
+        "for": "0",
+        "forType": "num",
+        "forUnits": "minutes",
+        "override_topic": false,
+        "state_location": "payload",
+        "override_payload": "msg",
+        "entity_location": "data",
+        "override_data": "msg",
+        "x": 650,
+        "y": 100,
+        "wires": [
+            [
+                "93463e01fa097643",
+                "df0c4c63bcb8d98f"
+            ],
+            [
+                "508effd452eaa5de"
+            ]
+        ]
+    },
+    {
+        "id": "93463e01fa097643",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "d": true,
+        "name": "on",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 930,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "508effd452eaa5de",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "d": true,
+        "name": "off",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 930,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "375e6e9249027c9c",
+        "type": "function",
+        "z": "ea1dae26620c8815",
+        "name": "Recursively Expand Groups",
+        "func": "const input = msg.entityid;\n\nif (!input) {\n    node.status({\n        fill: \"red\",\n        shape: \"ring\",\n        text: \"missing msg.payload\"\n    });\n\n    node.warn(\"No entity ID was supplied in msg.payload\");\n    return null;\n}\n\n// Access the Home Assistant state cache.\nconst ha = global.get(\"homeassistant\");\nconst states = ha?.homeAssistant?.states || ha?.states;\n\nif (!states) {\n    node.status({\n        fill: \"red\",\n        shape: \"ring\",\n        text: \"HA states unavailable\"\n    });\n\n    node.error(\n        \"Home Assistant states are not available. Enable Global Context Store in the Home Assistant server configuration.\",\n        msg\n    );\n\n    return null;\n}\n\nconst individualEntities = new Set();\nconst processedGroups = new Set();\nconst unresolvedEntities = new Set();\n\nfunction expandEntity(entityId) {\n    if (typeof entityId !== \"string\") {\n        return;\n    }\n\n    entityId = entityId.trim();\n\n    if (!entityId) {\n        return;\n    }\n\n    const stateObject = states[entityId];\n    const members = stateObject?.attributes?.entity_id;\n\n    // An entity with an entity_id array is treated as a group.\n    if (Array.isArray(members) && members.length > 0) {\n        // Prevent infinite recursion from circular group membership.\n        if (processedGroups.has(entityId)) {\n            return;\n        }\n\n        processedGroups.add(entityId);\n\n        for (const member of members) {\n            expandEntity(member);\n        }\n\n        return;\n    }\n\n    // Keep unresolved entities so Home Assistant can still attempt the action.\n    if (!stateObject) {\n        unresolvedEntities.add(entityId);\n    }\n\n    individualEntities.add(entityId);\n}\n\nconst startingEntities = Array.isArray(input) ? input : [input];\n\nfor (const entityId of startingEntities) {\n    expandEntity(entityId);\n}\n\nconst entities = Array.from(individualEntities);\n\nif (entities.length === 0) {\n    node.status({\n        fill: \"yellow\",\n        shape: \"ring\",\n        text: \"no entities found\"\n    });\n\n    node.warn(\"No individual entities were found.\");\n    return null;\n}\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `${entities.length} entities`\n});\n\n// Each array item is emitted as a separate Node-RED message.\nconst outputMessages = entities.map((entityId, index) => {\n    // Clone the complete incoming msg object\n    const newMsg = RED.util.cloneMessage(msg);\n    // Save the original payload\n    newMsg.group_source = input;\n\n    // Replace payload with the individual entity\n    newMsg.payload = entityId;\n\n    newMsg.entity_id= entityId,\n    newMsg.group_source= input,\n    newMsg.entity_number= index + 1,\n    newMsg.entity_count= entities.length,\n    newMsg.unresolved= unresolvedEntities.has(entityId)\n    \n    return newMsg;    \n});\n\nreturn [outputMessages];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 380,
+        "wires": [
+            [
+                "a34fe1dbf69c8731"
+            ]
+        ]
+    },
+    {
+        "id": "a34fe1dbf69c8731",
+        "type": "api-current-state",
+        "z": "ea1dae26620c8815",
+        "name": "Entity is On",
+        "server": "7bd90b25.c58474",
+        "version": 3,
+        "outputs": 2,
+        "halt_if": "on",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "entity_id": "{{entity_id}}",
+        "state_type": "str",
+        "blockInputOverrides": true,
+        "outputProperties": [],
+        "for": "0",
+        "forType": "num",
+        "forUnits": "minutes",
+        "override_topic": false,
+        "state_location": "payload",
+        "override_payload": "msg",
+        "entity_location": "data",
+        "override_data": "msg",
+        "x": 610,
+        "y": 380,
+        "wires": [
+            [
+                "c8c7483849b28347",
+                "2665056f291d5f47"
+            ],
+            [
+                "0668d2ce092b03df"
+            ]
+        ]
+    },
+    {
+        "id": "c8c7483849b28347",
+        "type": "api-call-service",
+        "z": "ea1dae26620c8815",
+        "name": "",
+        "server": "7bd90b25.c58474",
+        "version": 7,
+        "debugenabled": false,
+        "action": "logbook.log",
+        "floorId": [],
+        "areaId": [],
+        "deviceId": [],
+        "entityId": [],
+        "labelId": [],
+        "data": "{\"name\":\"Node Red Logging\",\"message\":\"{{descr}}\",\"entity_id\":\"{{payload}}\"}",
+        "dataType": "json",
+        "mergeContext": "",
+        "mustacheAltTags": false,
+        "outputProperties": [],
+        "queue": "none",
+        "blockInputOverrides": false,
+        "domain": "logbook",
+        "service": "log",
+        "x": 790,
+        "y": 360,
+        "wires": [
+            [
+                "0668d2ce092b03df"
+            ]
+        ]
+    },
+    {
+        "id": "0668d2ce092b03df",
+        "type": "function",
+        "z": "ea1dae26620c8815",
+        "name": "Completion Check",
+        "func": "// Only allow the final processed entity message through.\nif (msg.entity_number !== msg.entity_count) {\n    node.status({\n        fill: \"blue\",\n        shape: \"dot\",\n        text: `${msg.entity_number} of ${msg.entity_count}`\n    });\n\n    return null;\n}\n\nconst source = msg.group_source;\nconst count = msg.entity_count;\nconst lastEntity = msg.entity_id;\n\nmsg.payload = {\n    status: \"complete\",\n    source: source,\n    entity_count: count,\n    last_entity: lastEntity,\n    completed_at: new Date().toISOString()\n};\n\nmsg.topic = \"group_turn_off_complete\";\nmsg.complete = true;\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `complete: ${count} entities`\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1010,
+        "y": 400,
+        "wires": [
+            [
+                "7060d09eea074329",
+                "42abc64fc0d17b16"
+            ]
+        ]
+    },
+    {
+        "id": "ee1c78cafe3dab73",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "name": "Completion Output",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1490,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "e57615c1c91c82f1",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "",
+        "property": "action",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "off",
+                "vt": "str"
+            },
+            {
+                "t": "eq",
+                "v": "leave",
+                "vt": "str"
+            },
+            {
+                "t": "else"
+            }
+        ],
+        "checkall": "false",
+        "repair": false,
+        "outputs": 3,
+        "x": 178.5,
+        "y": 391.75,
+        "wires": [
+            [
+                "375e6e9249027c9c"
+            ],
+            [
+                "b90d220f258f895d"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "7060d09eea074329",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "if DEBUG = True",
+        "property": "DEBUG",
+        "propertyType": "env",
+        "rules": [
+            {
+                "t": "true"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 1270,
+        "y": 380,
+        "wires": [
+            [
+                "ee1c78cafe3dab73"
+            ]
+        ]
+    },
+    {
+        "id": "8fad7185e10c5422",
+        "type": "api-call-service",
+        "z": "ea1dae26620c8815",
+        "name": "Turn Off",
+        "server": "7bd90b25.c58474",
+        "version": 7,
+        "debugenabled": false,
+        "action": "homeassistant.turn_off",
+        "floorId": [],
+        "areaId": [],
+        "deviceId": [],
+        "entityId": [],
+        "labelId": [],
+        "data": "{ \"entity_id\": $env('ENTITYID') }",
+        "dataType": "jsonata",
+        "mergeContext": "",
+        "mustacheAltTags": false,
+        "outputProperties": [],
+        "queue": "none",
+        "blockInputOverrides": false,
+        "domain": "homeassistant",
+        "service": "turn_off",
+        "x": 1340,
+        "y": 460,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "2665056f291d5f47",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "if DEBUG = True",
+        "property": "DEBUG",
+        "propertyType": "env",
+        "rules": [
+            {
+                "t": "true"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 830,
+        "y": 320,
+        "wires": [
+            [
+                "fbdf57afd7102549"
+            ]
+        ]
+    },
+    {
+        "id": "fbdf57afd7102549",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "name": "Auto Off Action",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1060,
+        "y": 320,
+        "wires": []
+    },
+    {
+        "id": "b90d220f258f895d",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "if DEBUG = True",
+        "property": "DEBUG",
+        "propertyType": "env",
+        "rules": [
+            {
+                "t": "true"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 410,
+        "y": 440,
+        "wires": [
+            [
+                "9f94ecd0edd1c6d5"
+            ]
+        ]
+    },
+    {
+        "id": "9f94ecd0edd1c6d5",
+        "type": "api-current-state",
+        "z": "ea1dae26620c8815",
+        "name": "Entity is On",
+        "server": "7bd90b25.c58474",
+        "version": 3,
+        "outputs": 2,
+        "halt_if": "on",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "entity_id": "{{entityid}}",
+        "state_type": "str",
+        "blockInputOverrides": true,
+        "outputProperties": [],
+        "for": "0",
+        "forType": "num",
+        "forUnits": "minutes",
+        "override_topic": false,
+        "state_location": "payload",
+        "override_payload": "msg",
+        "entity_location": "data",
+        "override_data": "msg",
+        "x": 590,
+        "y": 440,
+        "wires": [
+            [
+                "4598bb7c4c37b4da"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "4598bb7c4c37b4da",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "name": "Leave Action",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 750,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "42abc64fc0d17b16",
+        "type": "api-call-service",
+        "z": "ea1dae26620c8815",
+        "name": "",
+        "server": "7bd90b25.c58474",
+        "version": 7,
+        "debugenabled": false,
+        "action": "logbook.log",
+        "floorId": [],
+        "areaId": [],
+        "deviceId": [],
+        "entityId": [],
+        "labelId": [],
+        "data": "{\"name\":\"Node Red Logging\",\"message\":\"{{descr}}\",\"entity_id\":\"{{entityid}}\"}",
+        "dataType": "json",
+        "mergeContext": "",
+        "mustacheAltTags": false,
+        "outputProperties": [],
+        "queue": "none",
+        "blockInputOverrides": false,
+        "domain": "logbook",
+        "service": "log",
+        "x": 1170,
+        "y": 460,
+        "wires": [
+            [
+                "8fad7185e10c5422",
+                "13dd28306b7654e3"
+            ]
+        ]
+    },
+    {
+        "id": "13dd28306b7654e3",
+        "type": "switch",
+        "z": "ea1dae26620c8815",
+        "name": "if DEBUG = True",
+        "property": "DEBUG",
+        "propertyType": "env",
+        "rules": [
+            {
+                "t": "true"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 1370,
+        "y": 500,
+        "wires": [
+            [
+                "20f558a9408fae04"
+            ]
+        ]
+    },
+    {
+        "id": "20f558a9408fae04",
+        "type": "debug",
+        "z": "ea1dae26620c8815",
+        "name": "Turn Off",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1540,
+        "y": 500,
+        "wires": []
+    },
+    {
+        "id": "b74c8f44822b6b60",
+        "type": "function",
+        "z": "ea1dae26620c8815",
+        "name": "Determine Action",
+        "func": "function ConvertSecondsToWords(totalSeconds) {\n  var minutes = Math.floor(Number(totalSeconds) / 60);\n  var seconds = Math.floor(Number(totalSeconds) % 60);\n\n  // Handle singular/plural formatting\n  var mDisplay = minutes > 0 ? minutes + (minutes === 1 ? \" minute\" : \" minutes\") : \"\";\n  var sDisplay = seconds > 0 ? seconds + (seconds === 1 ? \" second\" : \" seconds\") : \"\";\n\n  // Join parts with \"and\" if both exist\n  var sentence = [mDisplay, sDisplay].filter(Boolean).join(\" and \");\n\n  return  sentence || \"0 seconds\";    \n}\n\nconst now = Date.now();\nconst PRESENCE = env.get(\"PRESENCE\");\nconst HasSensor = env.get(\"SENSOR\");\nconst debug = Boolean(env.get(\"DEBUG\"));\nlet totalPresenceMs = 0;\nlet x =0;\nlet OccupancyCount = 0;\nconst gHomeAssistant = global.get('homeassistant').homeAssistant;\nmsg.action='leave';\nmsg.descr='';\nif (msg.reason != null || msg.reason != \"\") {\n  msg.descr = msg.reason+\" \";\n}\n\nmsg.currently = gHomeAssistant.states[msg.entityid].state;\nmsg.fullauto = gHomeAssistant.states[msg.entityid].context.user_id == 'e7ab148881b7499f9b3189442f4e473c' // that is the nodered user\n\nif (msg.currently=='on')\n{\n  if (debug == true) {\n  //  node.warn('Checking '+msg.entityid);\n  }      \n  // entity was last turned on by the nodered user and therefore we shoud continue with auto turn off logic below\n  if (msg.fullauto == false)\n  {\n    // if the entity was turned on manually then lets wait twice as long to turn it off\n    msg.min_absence = msg.min_absence * 2;\n    msg.min_on_time = msg.min_on_time * 2;\n    // if these values are still 0 then set them to 10 minutes\n    if (msg.min_absence == 0) { msg.min_absence = 10 * 60; } \n    if (msg.min_on_time == 0) { msg.min_on_time = 10 * 60; }\n\n  }\n\n  // 1. Get the last changed timestamp (ISO string)\n  const lastChanged = gHomeAssistant.states[msg.entityid].last_changed;\n\n  // 2. Convert timestamp and current time to Epoch milliseconds\n  const lastChangedMs = new Date(lastChanged).getTime();\n  const nowMs = Date.now();\n\n  // 3. Calculate difference in seconds\n  msg.on_for_seconds =(nowMs - lastChangedMs) / 1000;\n      \n  if (HasSensor != '') // Full Auto with a motion sensor\n  {\n      // msg.Occupied can be set to \"on\" already and in that case just leave it\n      // sometimes the timing is just right that ahead of this node, Occupied is true to it takes a path that does not get history records\n      if (msg.Occupied!='on'){\n        msg.Occupied = gHomeAssistant.states[msg.sensor].state\n      }  \n      \n      // if a room has had no motion for the last x miutes, there may be no history records to examine\n      if (msg.Occupied == 'on') {\n        // 1. Get the last changed timestamp (ISO string)\n        const lastChanged = gHomeAssistant.states[msg.sensor].last_changed;\n\n        // 2. Convert timestamp and current time to Epoch milliseconds\n        const lastChangedMs = new Date(lastChanged).getTime();\n        const nowMs = Date.now();\n\n        // 3. Calculate difference in seconds\n        const diffSeconds = (nowMs - lastChangedMs) / 1000;\n        msg.SecondsofOccupancy =(nowMs - lastChangedMs) / 1000;\n        msg.OccupancyCount = 1;\n        msg.SecondsSinceOccupancy = 0;\n      }\n      else { // unoccupied Room\n        // 1. Get the last changed timestamp (ISO string)\n        const lastChanged = gHomeAssistant.states[msg.sensor].last_changed;\n\n        // 2. Convert timestamp and current time to Epoch milliseconds\n        const lastChangedMs = new Date(lastChanged).getTime();\n        const nowMs = Date.now();\n\n        // 3. Calculate difference in seconds\n        const diffSeconds = (nowMs - lastChangedMs) / 1000;\n        msg.SecondsSinceOccupancy = (nowMs - lastChangedMs) / 1000;\n        msg.SecondsofOccupancy = 0\n        msg.OccupancyCount = 0;\n      }\n      \n\n      if (msg.Occupied == 'on'){\n        if (debug == true) {\n          node.warn('Occupied');\n        } \n        msg.action='leave';\n        msg.descr = msg.descr + 'Sensor: ' + msg.sensor+' indcates occupied.'\n      }\n      else { // unoccupied Room, need to be sure the room has ben unoccupied long enough\n        if (debug == true) {\n          node.warn('Unoccupied');\n      } \n\n      // now lets total up the amount of presence over the last x minutes\n      const WINDOW_MS = msg.x_minutes * 60 * 1000;\n      const now = Date.now();\n      const windowStart = now - WINDOW_MS;\n\n      let history = msg.payload;\n      if (!Array.isArray(history)) {\n        node.error(\"Expected Home Assistant history array in msg.payload\", msg);\n        return null;\n      }\n\n      // Normalize and sort records\n      let records = history\n        .filter(item => item && (item.last_changed || item.last_updated))\n        .map(item => ({ state: String(item.state || \"\").toLowerCase(),\n        ts: new Date(item.last_changed || item.last_updated).getTime()\n        }))\n        .filter(item => !isNaN(item.ts))\n        .sort((a, b) => a.ts - b.ts);\n\n        // Only keep records that could affect the last 10 minutes\n        records = records.filter(r => r.ts <= now);\n\n        // Find the state at the start of the window\n        let stateAtWindowStart = \"off\";\n        for (const r of records) {\n          if (r.ts <= windowStart) {\n            stateAtWindowStart = r.state;\n          } else {\n            break;\n          }\n        }\n\n        // Keep records inside the window\n        let windowRecords = records.filter(r => r.ts >= windowStart);\n\n        // Insert a synthetic starting record so duration is calculated correctly\n        windowRecords.unshift({\n          state: stateAtWindowStart,\n          ts: windowStart\n        });\n\n        let totalPresenceMs = 0;\n\n        for (let i = 0; i < windowRecords.length; i++) {\n          const current = windowRecords[i];\n          const next = windowRecords[i + 1];\n          const endTime = next ? next.ts : now;\n\n          const isOn = current.state === \"on\" || current.state === \"detected\" || current.state === \"true\";\n\n          if (isOn && endTime > current.ts) {\n            if (debug == true) {\n           //   let s = msg.sensor + ': on from ' + new Date( current.ts).toLocaleString() + ' to  ' + new Date(endTime).toLocaleString()+ ' = '+ ((endTime - current.ts)/1000) + ' seconds'\n           //   node.warn(s)\n            }\n            if (PRESENCE === 'TOTAL') {\n              // get total seconds of occupancy\n              totalPresenceMs += (endTime - current.ts);\n            }\n            // OR\n            // Use only the longest single period of occupancy\n            else if (PRESENCE === 'LONGEST') {\n              if ((endTime - current.ts) >= totalPresenceMs){\n                totalPresenceMs = (endTime - current.ts);\n              }\n            }\n            else if (PRESENCE === 'AVG') {\n              totalPresenceMs  =(endTime - current.ts);\n            }\n            else if (PRESENCE === 'LAST') {\n              totalPresenceMs = (endTime - current.ts);\n            }\n            OccupancyCount += 1\n\n          }\n        }\n        if ((totalPresenceMs>>0) && (PRESENCE === 'AVG')) {\n          totalPresenceMs = totalPresenceMs / OccupancyCount\n        }  \n\n        msg.SecondsofOccupancy = parseFloat((totalPresenceMs / 1000).toFixed(0));\n        msg.OccupancyCount = OccupancyCount;\n\n        // if the room is clear now and has been more clear than occupied over the last 10 minutes, turn off the lights\n        // 5 mins occupied require 5 minutes clear before turning off\n        // 1 min of occupation, require 1 minute of clear before turning off\n\n        // have decided to leave the entity on\n        if ((msg.action == \"leave\") && (msg.currently == \"on\")){\n          if (msg.Occupied=='on') {\n            msg.descr = \"Leaving \" + msg.entityid + \" on as the room is currently occupied.\";\n          }\n          else\n          {\n            if (((Number(msg.min_on_time) == 0) || ((Number(msg.on_for_seconds) > Number(msg.min_on_time))))\n              && ((Number(msg.min_absence) == 0) || ((Number(msg.SecondsSinceOccupancy) > Number(msg.min_absence)))))\n            {\n              msg.decision = 218;\n              msg.action = 'off';\n              msg.descr = \"Turning Off \" + msg.entityid + \". No motion for \" + ConvertSecondsToWords(msg.SecondsSinceOccupancy)\n              if ((Number(msg.min_on_time) > 0) && (Number(msg.on_for_seconds) >= Number(msg.min_on_time))) {\n                msg.descr = msg.descr + \" and the minimum on time (\" + ConvertSecondsToWords(msg.min_on_time) + \") has been met\"\n              }\n              if ((Number(msg.min_absence) > 0) && (Number(msg.SecondsSinceOccupancy) >= Number(msg.min_absence))) {\n                msg.descr = msg.descr + \" and the minimum absence (\" + ConvertSecondsToWords(msg.min_absence) + \") has been met\"\n              }\n              msg.descr = msg.descr + \".\";\n\n            }\n            else\n            {\n              msg.decision = 233;\n              msg.descr = \"Leaving \" + msg.entityid + \" on. No motion for \" + ConvertSecondsToWords(msg.SecondsSinceOccupancy);\n              if ((Number(msg.on_for_seconds) > 0) && (Number(msg.on_for_seconds) < Number(msg.min_on_time))) {\n                msg.descr = msg.descr + \" and the minimum on time (\" + ConvertSecondsToWords(msg.min_on_time) + \") has NOT been met\"\n              }\n              else if ((Number(msg.min_on_time) > 0) && (Number(msg.on_for_seconds) < Number(msg.min_on_time))) {\n                msg.descr = msg.descr + \" and the minimum on time (\" + ConvertSecondsToWords(msg.min_on_time) + \") has NOT been met\"\n              }\n              if ((Number(msg.min_absence) > 0) && (Number(msg.SecondsSinceOccupancy) < Number(msg.min_absence))) {\n                msg.descr = msg.descr + \" and the minimum absence (\" + ConvertSecondsToWords(msg.min_absence) + \") has NOT been met\"\n              }\n\n              msg.descr = msg.descr + \".\";\n\n            }\n\n          }\n\n        } \n//        else  // have decided to leave the entity off\n//        {\n//          if ((msg.action == \"leave\") && (msg.currently == \"off\")){\n//              msg.descr = \"Leaving \" + msg.entityid + \" off.\"\n//          }  \n//        }\n\n        var totalSeconds = Number(totalPresenceMs)/1000;\n        if ((totalSeconds/60) >> Number(msg.x_minutes)){\n          totalSeconds = Number(msg.x_minutes)*60\n        }    \n        msg.sentence = ConvertSecondsToWords(Number(totalSeconds));\n\n        if (msg.sentence !=\"\") {\n          msg.descr = msg.descr + \" \" + PRESENCE + \" presence was \" + msg.sentence+\".\"\n        } \n        else {\n          msg.descr = msg.descr + \" There was no \"+ PRESENCE + \" presence determined.\"\n        }  \n        if (msg.fullauto == false) {\n          msg.descr = msg.descr + \" Entity was last turned on Manually.\"\n\n        }\n\n      }\n            \n    } \n    else { // no motion sensor provided\n      if (debug == true) {\n        node.warn('No Sensor provided');\n      }      \n      // Convert to minutes and round\n      // seconds of occupancy\n      // Retrieve last_changed for a specific entity\n      \n      const lastChanged = gHomeAssistant.states[msg.entityid].last_changed;\n      var totalSeconds = (Date.now() - new Date(lastChanged).getTime())/1000;\n      msg.sentence = ConvertSecondsToWords(totalSeconds);\n\n    \n      if (debug == true) {\n        node.warn('action: '+msg.action);\n      }\n      if (msg.action == 'leave') { // no action yet to be take from prior logic\n        // check to see if its has been on long enough, Some devices turn off regardless of presense like fans and diffusers\n        if ((msg.currently == 'on') && (Number(msg.min_on_time) >= 0) && (Number(msg.on_for_seconds) >= Number(msg.min_on_time))){\n          // turn off since its been on past the Min_on_time and the room is not occupied\n          msg.decision = 274;\n          msg.action = 'off';\n          msg.sentence = ConvertSecondsToWords(Number(msg.on_for_seconds));\n          msg.descr = msg.descr + \"Turning Off \" + msg.entityid + \" as it has been on for \" + msg.sentence + \" exceeding the max on time of \"+ConvertSecondsToWords(Number(msg.min_on_time));\n          if (msg.fullauto == false) {\n            msg.descr = msg.descr + \" Entity was last turned on Manually.\"\n\n          }\n        }\n        else{\n          msg.decision = 284;\n          msg.descr = msg.descr + \"Leaving \" + msg.entityid + \" \" + msg.currently+ \" as it has only been \"+msg.currently+\" \" + msg.sentence;\n          if (msg.sentence !=\"\") {\n            msg.descr = msg.descr + \" and needs to be on for at least \" +ConvertSecondsToWords(Number(msg.min_on_time))+\".\"\n          } \n          if (msg.fullauto == false){\n            msg.descr = msg.descr + \" Entity was last turned on Manually.\"\n\n          }\n        }  \n      }\n    }\n    // WE MAY WANT TO TURN OFF DUE TO THE ILLUMINANCE LEVELS\n  if ((msg.fullauto == true) && (msg.currently == 'on') && (msg.action == 'leave') && (Number(msg.is_dark_lux) >> 0)) {\n    if (gHomeAssistant.states['sensor.illuminance'].state > Number(msg.is_dark_lux)) {\n      msg.decision = 299;\n      msg.action = 'off';\n      msg.descr = msg.descr + \"Turning Off \" + msg.entityid + \" on as Illuminace (\" + gHomeAssistant.states['sensor.illuminance'].state + \") has climbed above \" + msg.is_dark_lux;\n    }\n   \n  }\n\n}\nelse\n{\n  msg.currently = 'off';\n  msg.on_for_seconds = 0;\n  msg.descr = msg.descr + \"Leaving \" + msg.entityid + \" off\";\n}\n\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1890.75,
+        "y": 86.75,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "7bd90b25.c58474",
+        "type": "server",
+        "name": "Home Assistant",
+        "addon": false,
+        "rejectUnauthorizedCerts": false,
+        "ha_boolean": [],
+        "connectionDelay": false,
+        "cacheJson": false,
+        "heartbeat": false,
+        "heartbeatInterval": "",
+        "statusSeparator": "",
+        "enableGlobalContextStore": true
+    },
+    {
+        "id": "d4f5731f74d70a6d",
+        "type": "subflow:ea1dae26620c8815",
+        "z": "bc43d9c914784ed2",
+        "g": "492ffdad2c0718f9",
+        "name": "",
+        "env": [
+            {
+                "name": "SENSOR",
+                "value": "binary_sensor.presence_sensor_front_room_foyer_zone",
+                "type": "str"
+            },
+            {
+                "name": "ENTITYID",
+                "value": "light.foyer",
+                "type": "str"
+            },
+            {
+                "name": "MIN_SEC_ABSENCE",
+                "value": "60",
+                "type": "num"
+            },
+            {
+                "name": "MIN_SEC_ON",
+                "value": "30",
+                "type": "num"
+            }
+        ],
+        "x": 1546.984375,
+        "y": 763.98828125,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "c8d7c3554a584536",
+        "type": "inject",
+        "z": "bc43d9c914784ed2",
+        "g": "492ffdad2c0718f9",
+        "name": "Every 30 seconds",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "30",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1270,
+        "y": 780,
+        "wires": [
+            [
+                "d4f5731f74d70a6d"
+            ]
+        ]
+    },
+    {
+        "id": "94c68eae42d7d89b",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-home-assistant-websocket": "0.81.0"
+        }
+    }
+]
